@@ -1,0 +1,53 @@
+{
+  "schemaVersion": 1,
+  "id": "io.github.felipemayerdev.omaseafile",
+  "name": "OmaSeafile",
+  "version": "1.1.0",
+  "author": "Felipe Mayer",
+  "license": "MIT",
+  "description": "Seafile na barra do Omarchy: bibliotecas sincronizadas, estado ao vivo, tamanho em disco, bibliotecas do servidor, favoritos e notificações de transferência. Sobe o próprio seaf-daemon e conecta ao servidor sozinho — o cliente gráfico do Seafile é opcional.",
+  "kinds": [
+    "bar-widget"
+  ],
+  "entryPoints": {
+    "barWidget": "Panel.qml"
+  },
+  "barWidget": {
+    "displayName": "OmaSeafile",
+    "description": "Bibliotecas locais e do servidor, favoritos, progresso de download, controle do daemon e notificações. Não depende do cliente gráfico do Seafile.",
+    "category": "System",
+    "allowMultiple": false,
+    "defaultSection": "right",
+    "defaults": {
+      "interval": 10,
+      "notifyTransfers": true,
+      "remoteInterval": 60
+    },
+    "schema": [
+      {
+        "key": "interval",
+        "type": "integer",
+        "label": "Intervalo de atualização (segundos)",
+        "min": 2,
+        "max": 300,
+        "step": 1,
+        "defaultValue": 10
+      },
+      {
+        "key": "notifyTransfers",
+        "type": "boolean",
+        "label": "Notificar envios, recebimentos e erros",
+        "defaultValue": true
+      },
+      {
+        "key": "remoteInterval",
+        "type": "integer",
+        "label": "Intervalo das abas do servidor (segundos)",
+        "min": 15,
+        "max": 900,
+        "step": 15,
+        "defaultValue": 60
+      }
+    ]
+  }
+}

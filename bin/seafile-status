@@ -1,0 +1,594 @@
+#!/usr/bin/env python3
+"""Seafile state for the Omarchy bar widget.
+
+Talks straight to seaf-daemon's searpc socket (the same one seaf-cli uses),
+so it works for the flatpak client too, where seaf-cli lives inside the
+sandbox. Protocol: <uint32 length><json body>, both ways.
+
+  seafile-status              -> status json
+  seafile-status --sizes      -> plus worktree sizes on disk (du, slower)
+  seafile-status --remote     -> account, server libraries and starred items
+  seafile-status --daemon-start | --daemon-stop
+  seafile-status --login      -> {"server","user","password","otp"} on stdin
+  seafile-status --logout
+  seafile-status --sync <repo-id> | --desync <repo-id>
+  seafile-status --install-cmd -> shell command that installs the daemon
+
+The Seafile GUI client never has to run: this drives seaf-daemon directly.
+Only the daemon binary is required, native or from the flatpak.
+"""
+import datetime, json, os, socket, sqlite3, struct, subprocess, sys, time
+import urllib.error, urllib.parse, urllib.request
+
+HOME = os.path.expanduser("~")
+INIS = [f"{HOME}/.ccnet/seafile.ini",
+        f"{HOME}/.var/app/com.seafile.Client/.ccnet/seafile.ini"]
+
+WORKTREE = os.environ.get("OMASEAFILE_WORKTREE", f"{HOME}/Seafile")
+# Our own account store, so the GUI client's accounts.db is a fallback and
+# never a requirement. 0600: it holds an API token.
+CONF = f"{HOME}/.config/omarchy/omaseafile"
+ACCOUNT_FILE = f"{CONF}/account.json"
+# Sair da conta não pode apagar a conta do cliente gráfico, então marca a
+# saída: enquanto o marcador existir, o fallback do accounts.db é ignorado.
+LOGOUT_FLAG = f"{CONF}/logged-out"
+FLATPAK_APP = "com.seafile.Client"
+
+
+def data_dir():
+    for ini in INIS:
+        try:
+            with open(ini) as f:
+                p = f.read().strip()
+            if p:
+                return p
+        except OSError:
+            pass
+    return f"{HOME}/Seafile/.seafile-data"
+
+
+SOCK = os.path.join(data_dir(), "seafile.sock")
+
+
+def which(prog):
+    for d in os.environ.get("PATH", "").split(os.pathsep):
+        p = os.path.join(d, prog)
+        if os.access(p, os.X_OK):
+            return p
+    return ""
+
+
+def daemon_binary():
+    """Native seaf-daemon if installed, else the flatpak's. ("", ) if neither.
+
+    The flatpak is only allowed to see ~/Seafile and its own persistent
+    ~/.ccnet, so its paths are passed exactly as the sandbox sees them.
+    """
+    native = which("seaf-daemon")
+    if native:
+        return ("native", [native])
+    if which("flatpak") and subprocess.run(
+            ["flatpak", "info", FLATPAK_APP],
+            capture_output=True).returncode == 0:
+        return ("flatpak", ["flatpak", "run", "--command=seaf-daemon", FLATPAK_APP])
+    return ("", [])
+
+
+def install_command():
+    """How to get seaf-daemon onto this machine.
+
+    The AUR `seafile` package is the daemon itself — upstream's `make install`
+    puts seaf-daemon and seaf-cli in /usr/bin, no GUI (that's `seafile-client`).
+    That is what this plugin actually needs, so it comes first. The flatpak is
+    only a fallback for a machine without an AUR helper, and it must use the
+    system `flathub` remote: `--user` fails with "No remote refs found".
+    """
+    for helper in ("yay", "paru"):
+        if which(helper):
+            return helper + " -S --needed seafile"
+    if which("flatpak"):
+        return "flatpak install -y flathub com.seafile.Client"
+    return ""
+
+
+def daemon_running():
+    try:
+        s = socket.socket(socket.AF_UNIX)
+        s.settimeout(2)
+        s.connect(SOCK)
+        s.close()
+        return True
+    except OSError:
+        return False
+
+
+def daemon_start():
+    kind, cmd = daemon_binary()
+    if not kind:
+        return {"ok": False, "error": "seaf-daemon não encontrado (instale o pacote "
+                                      "seafile ou o flatpak com.seafile.Client)"}
+    if daemon_running():
+        return {"ok": True, "error": ""}
+    if kind == "native":
+        ccnet, data = f"{HOME}/.ccnet", os.path.join(WORKTREE, ".seafile-data")
+        os.makedirs(os.path.join(ccnet, "logs"), exist_ok=True)
+        os.makedirs(data, exist_ok=True)
+        ini = os.path.join(ccnet, "seafile.ini")
+        if not os.path.exists(ini):
+            with open(ini, "w") as f:
+                f.write(data)
+    else:
+        # Inside the sandbox $HOME is the app's own dir; ~/.ccnet is persistent
+        # there and ~/Seafile is bind-mounted from the host.
+        ccnet, data = "~/.ccnet", os.path.join(WORKTREE, ".seafile-data")
+    os.makedirs(WORKTREE, exist_ok=True)
+    subprocess.Popen(cmd + ["--daemon", "-c", ccnet, "-d", data, "-w", WORKTREE],
+                     stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                     start_new_session=True)
+    for _ in range(40):
+        if daemon_running():
+            return {"ok": True, "error": ""}
+        time.sleep(0.25)
+    return {"ok": False, "error": "o daemon não subiu a tempo"}
+
+
+def daemon_stop():
+    if not daemon_running():
+        return {"ok": True, "error": ""}
+    try:
+        call("seafile_shutdown")
+    except OSError:
+        pass
+    for _ in range(20):
+        if not daemon_running():
+            return {"ok": True, "error": ""}
+        time.sleep(0.25)
+    return {"ok": False, "error": "o daemon não parou"}
+
+
+def call(fname, *args):
+    s = socket.socket(socket.AF_UNIX)
+    s.settimeout(5)
+    try:
+        s.connect(SOCK)
+        req = json.dumps({"service": "seafile-rpcserver",
+                          "request": json.dumps([fname] + list(args))}).encode()
+        s.sendall(struct.pack("=I", len(req)) + req)
+        head = s.recv(4)
+        if len(head) < 4:
+            return None
+        n, = struct.unpack("=I", head)
+        buf = b""
+        while len(buf) < n:
+            chunk = s.recv(n - len(buf))
+            if not chunk:
+                return None
+            buf += chunk
+        return json.loads(buf).get("ret")
+    finally:
+        s.close()
+
+
+def pick(d, *keys):
+    for k in keys:
+        if isinstance(d, dict) and d.get(k) is not None:
+            return d[k]
+    return None
+
+
+def sync_err(err_id):
+    if not err_id:
+        return ""
+    msg = call("seafile_sync_error_id_to_str", err_id) or ""
+    return "" if msg.lower().startswith("no error") else msg
+
+
+def du(path):
+    try:
+        out = subprocess.run(["du", "-sb", path], capture_output=True,
+                             text=True, timeout=20).stdout
+        return int(out.split()[0])
+    except Exception:
+        return -1
+
+
+def selftest():
+    """Round-trips the searpc framing against a live daemon."""
+    out = json.loads(subprocess.run([sys.executable, __file__], capture_output=True,
+                                    text=True).stdout)
+    assert out["running"], "seaf-daemon not reachable at " + SOCK
+    assert isinstance(out["repos"], list) and isinstance(out["unsynced"], list)
+    for r in out["repos"]:
+        assert r["id"] and r["state"], r
+    print("ok:", len(out["repos"]), "libraries")
+
+
+# --------------------------------------------------------------- seahub ---
+# The desktop client already holds an API token in accounts.db; reuse it
+# instead of asking for credentials. Cloudflare in front of a server rejects
+# python's default User-Agent, so we present ourselves as the client.
+UA = "Seafile Client/9.0.20 (Linux)"
+
+
+def account():
+    """Our own login first; the GUI client's accounts.db only as a fallback,
+    so OmaSeafile works on a machine that never ran the desktop client."""
+    try:
+        with open(ACCOUNT_FILE) as f:
+            a = json.load(f)
+        if a.get("url") and a.get("token"):
+            a["url"] = a["url"].rstrip("/")
+            a.setdefault("name", a.get("user", ""))
+            a.setdefault("used", 0)
+            a.setdefault("total", -1)
+            return a
+    except (OSError, ValueError):
+        pass
+    if os.path.exists(LOGOUT_FLAG):
+        return None
+    return gui_account()
+
+
+def gui_account():
+    try:
+        db = sqlite3.connect("file:%s?mode=ro" % os.path.join(data_dir(), "accounts.db"),
+                             uri=True)
+        row = db.execute("select url, username, token from Accounts "
+                         "order by lastVisited desc limit 1").fetchone()
+    except sqlite3.Error:
+        return None
+    if not row or not row[2]:
+        return None
+    url, user, token = row
+    info = {}
+    try:
+        for k, v in db.execute("select key, value from ServerInfo where url = ?", (url,)):
+            info[k] = v
+    except sqlite3.Error:
+        pass
+    return {"url": url.rstrip("/"), "user": user, "token": token,
+            "name": info.get("name") or user,
+            "used": int(info.get("storage.used") or 0),
+            "total": int(info.get("storage.total") or -1)}
+
+
+def device_id():
+    """Stable per-machine id, the same one seaf-cli derives."""
+    idfile = os.path.join(data_dir(), "id")
+    try:
+        with open(idfile) as f:
+            v = f.read().strip()
+        if v:
+            return v
+    except OSError:
+        pass
+    v = os.urandom(20).hex()
+    try:
+        os.makedirs(data_dir(), exist_ok=True)
+        with open(idfile, "w") as f:
+            f.write(v)
+    except OSError:
+        pass
+    return v
+
+
+def post(url, payload, headers=None, timeout=20):
+    body = urllib.parse.urlencode(payload).encode()
+    h = {"User-Agent": UA, "Accept": "application/json",
+         "Content-Type": "application/x-www-form-urlencoded"}
+    h.update(headers or {})
+    req = urllib.request.Request(url, data=body, headers=h, method="POST")
+    with urllib.request.urlopen(req, timeout=timeout) as r:
+        return json.load(r)
+
+
+def login():
+    """Exchange user/password for an API token and remember it."""
+    try:
+        args = json.load(sys.stdin)
+    except ValueError:
+        print(json.dumps({"ok": False, "error": "entrada inválida"}))
+        return
+    url = (args.get("server") or "").strip().rstrip("/")
+    user = (args.get("user") or "").strip()
+    password = args.get("password") or ""
+    if not url.startswith("http"):
+        url = "https://" + url
+    if not url or not user or not password:
+        print(json.dumps({"ok": False, "error": "servidor, usuário e senha são obrigatórios"}))
+        return
+    headers = {}
+    if args.get("otp"):
+        headers["X-SEAFILE-OTP"] = str(args["otp"])
+    try:
+        res = post(url + "/api2/auth-token/", {
+            "username": user, "password": password,
+            "platform": "linux", "device_id": device_id(),
+            "device_name": "omaseafile-" + os.uname()[1][:25],
+            "client_version": "9.0.20", "platform_version": "",
+        }, headers)
+    except urllib.error.HTTPError as e:
+        detail = e.read()[:200].decode("utf-8", "replace")
+        msg = "senha inválida" if e.code == 400 else "HTTP %s" % e.code
+        if "otp" in detail.lower() or e.code == 401:
+            msg = "código de dois fatores necessário"
+        print(json.dumps({"ok": False, "error": msg}))
+        return
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return
+    token = res.get("token")
+    if not token:
+        print(json.dumps({"ok": False, "error": "servidor não devolveu token"}))
+        return
+    os.makedirs(CONF, exist_ok=True)
+    try:
+        os.remove(LOGOUT_FLAG)
+    except OSError:
+        pass
+    fd = os.open(ACCOUNT_FILE, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+    with os.fdopen(fd, "w") as f:
+        json.dump({"url": url, "user": user, "token": token, "name": user}, f)
+    print(json.dumps({"ok": True, "error": ""}))
+
+
+def logout():
+    try:
+        os.remove(ACCOUNT_FILE)
+    except OSError:
+        pass
+    try:
+        os.makedirs(CONF, exist_ok=True)
+        open(LOGOUT_FLAG, "w").close()
+    except OSError as e:
+        print(json.dumps({"ok": False, "error": str(e)}))
+        return
+    print(json.dumps({"ok": True, "error": ""}))
+
+
+def sync_repo(repo_id):
+    """Add a server library to the local sync set — `seaf-cli download`, but
+    over the RPC socket we already speak."""
+    acct = account()
+    if not acct:
+        return {"ok": False, "error": "faça login primeiro"}
+    if not daemon_running():
+        return {"ok": False, "error": "o daemon não está rodando"}
+    try:
+        d = api(acct, "/api2/repos/%s/download-info/" % repo_id)
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        return {"ok": False, "error": str(e)}
+    if d.get("encrypted") == 1:
+        return {"ok": False, "error": "biblioteca criptografada: sincronize pelo cliente Seafile"}
+    more = {"server_url": acct["url"], "is_readonly": 1 if d.get("permission") == "r" else 0}
+    if d.get("salt"):
+        more["repo_salt"] = d["salt"]
+    os.makedirs(WORKTREE, exist_ok=True)
+    try:
+        call("seafile_download", repo_id, d.get("repo_version", 0), d.get("repo_name"),
+             WORKTREE, d.get("token"), None, d.get("magic"), d.get("email"),
+             d.get("random_key"), d.get("enc_version"), json.dumps(more))
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "error": ""}
+
+
+def desync_repo(repo_id):
+    if not daemon_running():
+        return {"ok": False, "error": "o daemon não está rodando"}
+    try:
+        call("seafile_destroy_repo", repo_id)
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "error": ""}
+
+
+def epoch(value):
+    """starred-items reports an ISO timestamp; the repo APIs report epochs."""
+    if isinstance(value, (int, float)):
+        return int(value)
+    try:
+        return int(datetime.datetime.fromisoformat(value).timestamp())
+    except (TypeError, ValueError):
+        return 0
+
+
+def api(acct, path):
+    req = urllib.request.Request(acct["url"] + path, headers={
+        "Authorization": "Token " + acct["token"],
+        "Accept": "application/json",
+        "User-Agent": UA,
+    })
+    with urllib.request.urlopen(req, timeout=10) as r:
+        return json.load(r)
+
+
+def remote():
+    out = {"account": None, "serverRepos": [], "starred": [], "remoteError": ""}
+    acct = account()
+    if not acct:
+        # Sem conta o painel mostra o formulário de login; um erro aqui só
+        # poluiria a tela depois de uma saída deliberada.
+        print(json.dumps(out))
+        return
+    out["account"] = {"url": acct["url"], "user": acct["user"], "name": acct["name"],
+                      "used": acct["used"], "total": acct["total"]}
+
+    local = set()
+    try:
+        for r in call("seafile_get_repo_list", -1, -1) or []:
+            local.add(r["id"])
+    except OSError:
+        pass
+
+    try:
+        for r in api(acct, "/api2/repos/"):
+            out["serverRepos"].append({
+                "id": r.get("id"),
+                "name": r.get("name") or "",
+                "size": r.get("size") or 0,
+                "mtime": r.get("mtime") or 0,
+                "encrypted": bool(r.get("encrypted")),
+                "permission": r.get("permission") or "",
+                "owner": r.get("owner_name") or "",
+                "synced": r.get("id") in local,
+            })
+        out["serverRepos"].sort(key=lambda r: (r["synced"], -r["size"]))
+    except (urllib.error.URLError, OSError, ValueError) as e:
+        out["remoteError"] = "Bibliotecas: %s" % e
+
+    # 11.x serves starred-items; older servers only the api2 endpoint.
+    try:
+        items = api(acct, "/api/v2.1/starred-items/").get("starred_item_list", [])
+        out["starred"] = [{
+            "repo": i.get("repo_name") or "",
+            "repoId": i.get("repo_id") or "",
+            "path": i.get("path") or "",
+            "name": (i.get("obj_name") or (i.get("path") or "").rstrip("/").split("/")[-1]),
+            "isDir": bool(i.get("is_dir")),
+            "mtime": epoch(i.get("mtime")),
+            "size": i.get("size") or -1,
+        } for i in items if not i.get("deleted")]
+    except (urllib.error.URLError, OSError, ValueError, AttributeError):
+        try:
+            for i in api(acct, "/api2/starredfiles/"):
+                out["starred"].append({
+                    "repo": i.get("repo_name") or "", "repoId": i.get("repo_id") or "",
+                    "path": i.get("path") or "", "isDir": bool(i.get("is_dir")),
+                    "name": (i.get("path") or "").rstrip("/").split("/")[-1],
+                    "mtime": epoch(i.get("mtime")), "size": i.get("size") or -1,
+                })
+        except (urllib.error.URLError, OSError, ValueError) as e:
+            if not out["remoteError"]:
+                out["remoteError"] = "Favoritos: %s" % e
+
+    print(json.dumps(out))
+
+
+def arg_after(flag):
+    i = sys.argv.index(flag)
+    return sys.argv[i + 1] if i + 1 < len(sys.argv) else ""
+
+
+def main():
+    if "--install-cmd" in sys.argv:
+        cmd = install_command()
+        return print(json.dumps({"cmd": cmd,
+                                 "error": "" if cmd else "nenhum instalador disponível"}))
+    if "--daemon-start" in sys.argv:
+        return print(json.dumps(daemon_start()))
+    if "--daemon-stop" in sys.argv:
+        return print(json.dumps(daemon_stop()))
+    if "--login" in sys.argv:
+        return login()
+    if "--logout" in sys.argv:
+        return logout()
+    if "--sync" in sys.argv:
+        return print(json.dumps(sync_repo(arg_after("--sync"))))
+    if "--desync" in sys.argv:
+        return print(json.dumps(desync_repo(arg_after("--desync"))))
+    if "--remote" in sys.argv:
+        return remote()
+    if "--selftest" in sys.argv:
+        return selftest()
+    sizes = "--sizes" in sys.argv
+    kind, _ = daemon_binary()
+    out = {"running": False, "repos": [], "cloning": [], "unsynced": [], "autoSync": True,
+           "upRate": 0, "downRate": 0, "root": WORKTREE,
+           "daemonBinary": kind, "loggedIn": account() is not None,
+           "installCmd": "" if kind else install_command()}
+    try:
+        repos = call("seafile_get_repo_list", -1, -1)
+    except OSError:
+        print(json.dumps(out))
+        return
+    out["running"] = True
+    out["autoSync"] = bool(call("seafile_is_auto_sync_enabled"))
+    out["upRate"] = call("seafile_get_upload_rate") or 0
+    out["downRate"] = call("seafile_get_download_rate") or 0
+
+    worktrees = set()
+    for r in repos or []:
+        wt = r.get("worktree") or ""
+        worktrees.add(os.path.realpath(wt))
+        task = call("seafile_get_repo_sync_task", r["id"]) or {}
+        err = task.get("error") or 0
+        entry = {
+            "id": r["id"],
+            "name": r.get("name") or r.get("repo-name") or "",
+            "path": wt,
+            "state": task.get("state") or "unknown",
+            "error": sync_err(err),
+            "lastSync": r.get("last-sync-time") or 0,
+            "encrypted": bool(r.get("encrypted")),
+            "autoSync": bool(r.get("auto-sync")),
+            "invalid": bool(r.get("worktree-invalid")),
+            "size": du(wt) if sizes and wt else -1,
+        }
+        t = call("seafile_find_transfer_task", r["id"])
+        # A finished task lingers with zeroes; only a live one is worth showing.
+        if t and (pick(t, "rate") or pick(t, "block-total", "block_total")):
+            entry["transfer"] = {
+                "type": pick(t, "ttype", "type") or "",
+                "rate": pick(t, "rate") or 0,
+                "done": pick(t, "block-done", "block_done") or 0,
+                "total": pick(t, "block-total", "block_total") or 0,
+            }
+        out["repos"].append(entry)
+
+    # Uma biblioteca sendo baixada pela primeira vez NÃO aparece em
+    # get_repo_list: ela é uma clone task até terminar. Sem isso o download
+    # roda invisível e o botão de sincronizar parece não fazer nada.
+    for t in call("seafile_get_clone_tasks") or []:
+        state = t.get("state") or ""
+        if state == "done":
+            continue
+        rid = t.get("repo-id") or t.get("repo_id") or ""
+        entry = {
+            "id": rid,
+            "name": t.get("repo-name") or t.get("repo_name") or "",
+            "path": t.get("worktree") or "",
+            "state": state,
+            "error": sync_err(t.get("error") or 0),
+        }
+        tt = call("seafile_find_transfer_task", rid) if rid else None
+        if tt and (pick(tt, "rate") or pick(tt, "block-total", "block_total")):
+            entry["transfer"] = {
+                "type": pick(tt, "ttype", "type") or "",
+                "rate": pick(tt, "rate") or 0,
+                "done": pick(tt, "block-done", "block_done") or 0,
+                "total": pick(tt, "block-total", "block_total") or 0,
+            }
+        out["cloning"].append(entry)
+        # A pasta do clone já existe no disco; sem isto ela seria listada
+        # como "fora do sync" enquanto baixa.
+        if entry["path"]:
+            worktrees.add(os.path.realpath(entry["path"]))
+
+    # Folders sitting in the Seafile root that no library syncs. The root may
+    # not exist yet (fresh install, or the user deleted it).
+    try:
+        entries = sorted(os.listdir(out["root"]))
+    except OSError:
+        entries = []
+    for name in entries:
+        path = os.path.join(out["root"], name)
+        if name.startswith(".") or not os.path.isdir(path):
+            continue
+        if os.path.realpath(path) in worktrees:
+            continue
+        out["unsynced"].append({"name": name, "path": path,
+                                "size": du(path) if sizes else -1})
+
+    errs = call("seafile_get_file_sync_errors", -1, -1) or []
+    out["fileErrors"] = [{
+        "repo": e.get("repo_name") or e.get("repo-name") or "",
+        "path": e.get("path") or "",
+        "error": sync_err(e.get("err_id") or e.get("err-id") or 0),
+    } for e in errs[:20]]
+
+    print(json.dumps(out))
+
+
+if __name__ == "__main__":
+    main()
