@@ -14,6 +14,23 @@ The only requirement is the `seaf-daemon` binary. If it is not on the machine,
 the panel offers a button that installs it (`yay -S --needed seafile` on Arch,
 which ships the daemon and `seaf-cli`, no GUI).
 
+## Remove
+
+```sh
+omarchy plugin remove io.github.felipemayerdev.omaseafile
+```
+
+That takes the widget out of the bar and deletes the plugin folder. It leaves
+your Seafile data alone, on purpose — removing the plugin is not a reason to
+drop synced files or stop the daemon. To clean up the rest yourself:
+
+```sh
+rm -rf ~/.config/omarchy/omaseafile   # the API token this plugin stored
+seaf-cli stop                          # if you also want the daemon down
+```
+
+Your synced libraries in `~/Seafile` and the Seafile packages are untouched.
+
 ## The desktop client is optional
 
 OmaSeafile talks straight to `seaf-daemon`'s RPC socket
