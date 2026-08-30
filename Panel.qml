@@ -25,12 +25,12 @@ Panel {
   readonly property color urgent: bar && bar.urgent !== undefined ? bar.urgent : "#cc6666"
 
   readonly property string statusScript: Qt.resolvedUrl("bin/seafile-status").toString().replace(/^file:\/\//, "")
-  // O "svg" do Seafile é só um wrapper com um PNG 128px dentro; usar o PNG
-  // direto evita o borrão que o Qt produz rasterizando o wrapper.
+  // Seafile's "svg" is just a wrapper around an embedded 128px PNG; using the
+  // PNG directly avoids the blur Qt produces rasterizing that wrapper.
   readonly property url logo: Qt.resolvedUrl("seafile.png")
-  // Máscara monocromática do mesmo logo (as nuvens e o anel, sem o disco
-  // laranja), tingida com a cor do tema na barra. O logo colorido fica no
-  // painel. Colorizar o PNG original não serviria: ele é um disco cheio.
+  // Monochrome mask of the same mark (clouds and ring, without the orange
+  // disc), tinted with the theme color in the bar; the panel keeps the colored
+  // logo. Colorizing the original would not do: it is a filled disc.
   readonly property url logoMono: Qt.resolvedUrl("seafile-mono.png")
 
   property var info: ({})
@@ -39,8 +39,8 @@ Panel {
 
   readonly property bool running: info.running === true
   readonly property var repos: info.repos || []
-  // Bibliotecas ainda baixando pela primeira vez: vivem em clone tasks, fora
-  // da lista de repositórios, até o download terminar.
+  // Libraries still downloading for the first time: they live in clone tasks,
+  // out of the repo list, until the download finishes.
   readonly property var cloning: info.cloning || []
   readonly property var unsynced: info.unsynced || []
   readonly property var fileErrors: info.fileErrors || []
@@ -54,6 +54,9 @@ Panel {
   readonly property string installCmd: info.installCmd || ""
 
   property bool daemonBusy: false
+  // Autostart runs once per shell session, and never fights a deliberate stop.
+  property bool autostartTried: false
+  property bool userStopped: false
   property bool loginBusy: false
   property string actionError: ""
   property string busyRepo: ""
@@ -79,14 +82,14 @@ Panel {
   }
 
   readonly property string statusText: {
-    if (daemonBusy) return running ? "Parando o daemon…" : "Iniciando o daemon…"
-    if (!hasDaemon) return "seaf-daemon não instalado"
-    if (!running) return "Daemon parado"
-    if (cloning.length > 0) return cloning.length + " baixando"
-    if (repos.length === 0) return "Nenhuma biblioteca"
-    if (errorCount > 0) return errorCount + " com erro · " + repos.length + " bibliotecas"
-    if (busyCount > 0) return busyCount + " sincronizando"
-    return repos.length + " bibliotecas sincronizadas"
+    if (daemonBusy) return running ? "Stopping the daemon…" : "Starting the daemon…"
+    if (!hasDaemon) return "seaf-daemon not installed"
+    if (!running) return "Daemon stopped"
+    if (cloning.length > 0) return cloning.length + " downloading"
+    if (repos.length === 0) return "No libraries"
+    if (errorCount > 0) return errorCount + " with errors · " + repos.length + " libraries"
+    if (busyCount > 0) return busyCount + " syncing"
+    return repos.length + " libraries in sync"
   }
 
   function isBusy(state) {
@@ -104,17 +107,17 @@ Panel {
   }
 
   function stateLabel(repo) {
-    if (repo.invalid) return "pasta ausente"
+    if (repo.invalid) return "folder missing"
     if (repo.error) return repo.error
     if (repo.transfer && repo.transfer.rate > 0)
-      return (repo.state === "uploading" ? "enviando" : "recebendo") + " · " + fmtSize(repo.transfer.rate) + "/s"
-    if (repo.state === "uploading") return "enviando"
-    if (repo.state === "downloading") return "recebendo"
-    if (repo.state === "committing") return "indexando"
-    if (repo.state === "merging") return "mesclando"
-    if (repo.state === "initializing") return "iniciando"
-    if (!repo.autoSync) return "pausada"
-    return repo.lastSync > 0 ? "sincronizada " + fmtAgo(repo.lastSync) : "sincronizada"
+      return (repo.state === "uploading" ? "uploading" : "downloading") + " · " + fmtSize(repo.transfer.rate) + "/s"
+    if (repo.state === "uploading") return "uploading"
+    if (repo.state === "downloading") return "downloading"
+    if (repo.state === "committing") return "indexing"
+    if (repo.state === "merging") return "merging"
+    if (repo.state === "initializing") return "starting up"
+    if (!repo.autoSync) return "paused"
+    return repo.lastSync > 0 ? "in sync · " + fmtAgo(repo.lastSync) : "in sync"
   }
 
   function cloneLabel(task) {
@@ -122,16 +125,16 @@ Panel {
     var t = task.transfer
     if (t && t.total > 0) {
       var pct = Math.floor(100 * t.done / t.total)
-      var line = "baixando " + pct + "%  ·  " + fmtSize(t.done) + " de " + fmtSize(t.total)
+      var line = "downloading " + pct + "%  ·  " + fmtSize(t.done) + " of " + fmtSize(t.total)
       if (t.rate > 0) line += "  ·  " + fmtSize(t.rate) + "/s"
       return line
     }
-    if (task.state === "checkout") return "gravando os arquivos"
-    if (task.state === "fetch") return "baixando"
-    if (task.state === "check-server") return "falando com o servidor"
-    if (task.state === "password-required") return "precisa da senha da biblioteca"
-    if (task.state === "canceled") return "cancelado"
-    if (task.state === "error") return "falhou"
+    if (task.state === "checkout") return "writing files"
+    if (task.state === "fetch") return "downloading"
+    if (task.state === "check-server") return "contacting the server"
+    if (task.state === "password-required") return "library password required"
+    if (task.state === "canceled") return "canceled"
+    if (task.state === "error") return "failed"
     return task.state
   }
 
@@ -150,19 +153,19 @@ Panel {
   function fmtAgo(epoch) {
     if (!epoch) return ""
     var s = Math.max(0, Math.floor(Date.now() / 1000) - epoch)
-    if (s < 60) return "agora"
-    if (s < 3600) return "há " + Math.floor(s / 60) + " min"
-    if (s < 86400) return "há " + Math.floor(s / 3600) + " h"
-    return "há " + Math.floor(s / 86400) + " d"
+    if (s < 60) return "just now"
+    if (s < 3600) return Math.floor(s / 60) + " min ago"
+    if (s < 86400) return Math.floor(s / 3600) + " h ago"
+    return Math.floor(s / 86400) + " d ago"
   }
 
   // ------------------------------------------------------------- refresh ---
   property var lastStates: ({})
-  // Clones vistos na leitura anterior, para saber quando um termina: uma
-  // clone task some da lista ao virar repositório.
+  // Clones seen on the previous read, so we can tell when one finishes: a
+  // clone task simply disappears once it becomes a repository.
   property var lastCloning: ({})
-  // A primeira leitura só registra o estado: sem isto tudo que já existe
-  // seria anunciado a cada restart do shell.
+  // The first read only records state: without this every existing library
+  // would be announced on each shell restart.
   property bool primed: false
 
   function refresh() { if (!statusProc.running) statusProc.running = true }
@@ -175,6 +178,7 @@ Panel {
     if (!next || typeof next !== "object") return
     notifyChanges(next)
     info = next
+    maybeAutostart()
   }
 
   function updateRemote(raw) {
@@ -209,27 +213,27 @@ Panel {
       var was = lastStates[r.id] || ""
       seen[r.id] = r.state
       if (!notifyTransfers) continue
-      // Biblioteca que não existia: o download terminou. Vale mesmo quando o
-      // clone foi rápido demais para aparecer em duas leituras seguidas.
+      // A library that did not exist before: its download finished. This holds
+      // even when the clone was too quick to show up in two consecutive reads.
       if (was === "") {
-        notify("normal", "Biblioteca baixada", r.name + " está pronta")
+        notify("normal", "Library downloaded", r.name + " is ready")
         continue
       }
       if (was === r.state) continue
       if (r.error)
-        notify("critical", "Erro de sincronização", r.name + ": " + r.error)
+        notify("critical", "Sync error", r.name + ": " + r.error)
       else if (r.state === "uploading")
-        notify("low", "Enviando arquivos", r.name)
+        notify("low", "Uploading files", r.name)
       else if (r.state === "downloading")
-        notify("low", "Recebendo arquivos", r.name)
+        notify("low", "Downloading files", r.name)
       else if (r.state === "synchronized" && isBusy(was))
-        notify("low", "Sincronizado", r.name)
+        notify("low", "In sync", r.name)
     }
     lastStates = seen
   }
 
-  // Um download que termina sai de `cloning` e entra em `repos`. Um que falha
-  // sai de `cloning` sem entrar em lugar nenhum — os dois merecem aviso.
+  // A finished download leaves `cloning` and lands in `repos`. A failed one
+  // leaves `cloning` for nowhere — both deserve a notification.
   function notifyClones(next) {
     var current = {}
     var list = next.cloning || []
@@ -243,18 +247,18 @@ Panel {
       var repoList = next.repos || []
       for (i = 0; i < repoList.length; i++) if (repoList[i].id === id) landed = true
       if (!notifyTransfers) continue
-      // O caso de sucesso é anunciado pelo repositório novo em notifyChanges.
+      // The success case is announced by the new repo in notifyChanges.
       if (landed) continue
-      else if (was.error) notify("critical", "Download falhou", was.name + ": " + was.error)
-      else notify("critical", "Download interrompido", was.name)
+      else if (was.error) notify("critical", "Download failed", was.name + ": " + was.error)
+      else notify("critical", "Download interrupted", was.name)
     }
 
-    // Uma falha que ainda está na lista (state "error") também avisa, uma vez.
+    // A failure still in the list (state "error") is announced once too.
     for (i = 0; i < list.length; i++) {
       var c = list[i]
       var prev = lastCloning[c.id]
       if (notifyTransfers && c.error && (!prev || !prev.error))
-        notify("critical", "Erro no download", c.name + ": " + c.error)
+        notify("critical", "Download error", c.name + ": " + c.error)
     }
 
     lastCloning = current
@@ -306,8 +310,20 @@ Panel {
     } catch (e) { actionError = "" }
   }
 
+  // The daemon does not survive a reboot on its own, and the shell starts with
+  // the session — so the widget brings it up the first time it sees it down.
+  function maybeAutostart() {
+    if (autostartTried || userStopped || daemonBusy) return
+    if (!hasDaemon || running) return
+    if (setting("autostart", true) === false) return
+    autostartTried = true
+    daemonBusy = true
+    runAction(daemonProc, ["--daemon-start"])
+  }
+
   function toggleDaemon() {
     if (daemonBusy || !hasDaemon) return
+    userStopped = running
     daemonBusy = true
     runAction(daemonProc, [running ? "--daemon-stop" : "--daemon-start"])
   }
@@ -408,7 +424,7 @@ Panel {
       onStreamFinished: {
         var cmd = ""
         try { cmd = JSON.parse(text).cmd || "" } catch (e) {}
-        if (cmd === "") { root.actionError = "nenhum instalador disponível"; return }
+        if (cmd === "") { root.actionError = "no installer available"; return }
         root.close()
         Quickshell.execDetached(["omarchy-launch-floating-terminal-with-presentation",
                                  cmd + "; echo; read -p 'Enter para fechar'"])
@@ -459,8 +475,8 @@ Panel {
     id: button
     anchors.fill: parent
     bar: root.bar
-    // O ícone da barra é o logo do Seafile em monocromático, tingido com o
-    // foreground do tema — mesmo tratamento que o Tray dá a ícones simbólicos.
+    // The bar icon is the Seafile mark in monochrome, tinted with the theme
+    // foreground — the same treatment the Tray gives symbolic icons.
     text: ""
     opacity: root.running ? 1 : 0.5
     slotSize: Style.bar.statusSlot
@@ -484,7 +500,7 @@ Panel {
           sourceSize.height: 64
           smooth: true
           mipmap: true
-          // Mantido como camada escondida para o efeito amostrar a textura.
+          // Kept as a hidden layer so the effect can sample it as a texture.
           visible: false
           layer.enabled: true
         }
@@ -495,7 +511,7 @@ Panel {
           colorization: 1.0
           colorizationColor: root.barForeground
 
-          // Uma transferência em curso faz o ícone pulsar.
+          // A running transfer makes the mark pulse.
           SequentialAnimation on opacity {
             running: root.busyCount > 0
             loops: Animation.Infinite
@@ -554,8 +570,8 @@ Panel {
           PanelHero {
             width: parent.width
             title: "OmaSeafile"
-            // A conta vai na linha de status, não no `detail`: como chip ao lado
-            // do título ela espremia "OmaSeafile" até virar "Oma…".
+            // The account goes on the status line, not in `detail`: as a chip
+            // beside the title it squeezed "OmaSeafile" down to "Oma…".
             meta: root.account
               ? root.statusText + " · " + root.fmtSize(root.account.used)
               : root.statusText
@@ -586,7 +602,7 @@ Panel {
                 }
               }
             }
-            // O daemon é nosso: liga e desliga aqui, sem o cliente gráfico.
+            // The daemon is ours: start and stop it here, no desktop client.
             trailingControl: Component {
               ToggleSwitch {
                 visible: root.hasDaemon
@@ -598,21 +614,37 @@ Panel {
             }
           }
 
-          ButtonGroup {
+          // Square tabs spanning the full card width: three equal columns, no
+          // pill radius, so the row reads as a segmented control.
+          Row {
             id: tabs
-            foreground: root.barForeground
-            fontFamily: root.fontFamily
-            fontSize: Style.font.caption
-            focusable: false
-            value: root.tab
-            options: [
-              { value: "local", label: "Locais" },
-              { value: "server", label: "Remotas" },
-              { value: "starred", label: "Favoritos" }
+            width: parent.width
+            spacing: Style.space(6)
+
+            readonly property var items: [
+              { value: "local", label: "Local" },
+              { value: "server", label: "Remote" },
+              { value: "starred", label: "Starred" }
             ]
-            onChanged: function(v) {
-              root.tab = v
-              if (v !== "local") root.refreshRemote()
+
+            Repeater {
+              model: tabs.items
+
+              Button {
+                required property var modelData
+                width: (tabs.width - tabs.spacing * (tabs.items.length - 1)) / tabs.items.length
+                radius: 0
+                bordered: true
+                selected: root.tab === modelData.value
+                text: modelData.label
+                fontSize: Style.font.caption
+                foreground: root.barForeground
+                fontFamily: root.fontFamily
+                onClicked: {
+                  root.tab = modelData.value
+                  if (modelData.value !== "local") root.refreshRemote()
+                }
+              }
             }
           }
 
@@ -624,7 +656,7 @@ Panel {
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "O binário seaf-daemon não está nesta máquina. É só dele que o OmaSeafile precisa — o cliente gráfico não entra."
+              text: "The seaf-daemon binary is not on this machine. It is all OmaSeafile needs — the desktop client stays out of it."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -632,7 +664,7 @@ Panel {
 
             Button {
               iconText: "󰇚"
-              text: "Instalar o seaf-daemon"
+              text: "Install seaf-daemon"
               fontSize: Style.font.caption
               bordered: true
               enabled: root.installCmd !== ""
@@ -641,13 +673,13 @@ Panel {
               onClicked: root.installDaemon()
             }
 
-            // O comando fica à vista antes do clique: quem preferir roda no
-            // próprio terminal, e ninguém instala às cegas.
+            // The command is visible before the click: anyone who prefers can
+            // run it in their own terminal, and nobody installs blind.
             Text {
               visible: root.installCmd !== ""
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "Roda em um terminal flutuante:  " + root.installCmd
+              text: "Runs in a floating terminal:  " + root.installCmd
               color: root.dim
               opacity: 0.8
               font.family: root.fontFamily
@@ -658,7 +690,7 @@ Panel {
               visible: root.installCmd === ""
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "Nenhum instalador disponível aqui. No Arch: yay -S seafile. Em outras distros, instale o pacote que traz o seaf-daemon."
+              text: "No installer available here. On Arch: yay -S seafile. Elsewhere, install the package that ships seaf-daemon."
               color: root.dim
               opacity: 0.8
               font.family: root.fontFamily
@@ -670,7 +702,7 @@ Panel {
             visible: root.hasDaemon && !root.running && !root.daemonBusy
             width: parent.width
             wrapMode: Text.WordWrap
-            text: "Daemon parado. Use a chave acima para ligar."
+            text: "Daemon stopped. Use the switch above to start it."
             color: root.dim
             font.family: root.fontFamily
             font.pixelSize: Style.font.caption
@@ -694,7 +726,7 @@ Panel {
 
             PanelSeparator { foreground: root.barForeground }
             PanelSectionHeader {
-              text: "BAIXANDO"
+              text: "DOWNLOADING"
               foreground: root.barForeground
               fontFamily: root.fontFamily
             }
@@ -719,7 +751,7 @@ Panel {
 
             PanelSeparator { foreground: root.barForeground }
             PanelSectionHeader {
-              text: "BIBLIOTECAS"
+              text: "LIBRARIES"
               foreground: root.barForeground
               fontFamily: root.fontFamily
             }
@@ -741,7 +773,7 @@ Panel {
 
             PanelSeparator { foreground: root.barForeground }
             PanelSectionHeader {
-              text: "PASTAS FORA DO SYNC"
+              text: "FOLDERS NOT SYNCED"
               foreground: root.barForeground
               fontFamily: root.fontFamily
             }
@@ -766,7 +798,7 @@ Panel {
 
             PanelSeparator { foreground: root.barForeground }
             PanelSectionHeader {
-              text: "ARQUIVOS COM ERRO"
+              text: "FILES WITH ERRORS"
               foreground: root.barForeground
               fontFamily: root.fontFamily
             }
@@ -793,7 +825,7 @@ Panel {
 
             PanelSeparator { foreground: root.barForeground }
             PanelSectionHeader {
-              text: "CONECTAR AO SERVIDOR"
+              text: "CONNECT TO SERVER"
               foreground: root.barForeground
               fontFamily: root.fontFamily
             }
@@ -807,13 +839,13 @@ Panel {
             TextField {
               id: userField
               width: parent.width
-              placeholderText: "e-mail"
+              placeholderText: "email"
               foreground: root.barForeground
             }
             TextField {
               id: passField
               width: parent.width
-              placeholderText: "senha"
+              placeholderText: "password"
               password: true
               foreground: root.barForeground
               onAccepted: root.submitLogin()
@@ -821,14 +853,14 @@ Panel {
             TextField {
               id: otpField
               width: parent.width
-              placeholderText: "código 2FA (se usar)"
+              placeholderText: "2FA code (if enabled)"
               foreground: root.barForeground
               onAccepted: root.submitLogin()
             }
 
             Button {
               iconText: "󰍁"
-              text: root.loginBusy ? "Conectando…" : "Conectar"
+              text: root.loginBusy ? "Connecting…" : "Connect"
               fontSize: Style.font.caption
               bordered: true
               enabled: !root.loginBusy
@@ -840,7 +872,7 @@ Panel {
             Text {
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "A senha só é usada para pegar um token de API, guardado em ~/.config/omarchy/omaseafile/account.json (0600)."
+              text: "The password is only exchanged for an API token, stored in ~/.config/omarchy/omaseafile/account.json (0600)."
               color: root.dim
               opacity: 0.8
               font.family: root.fontFamily
@@ -856,7 +888,7 @@ Panel {
 
             PanelSeparator { foreground: root.barForeground }
             PanelSectionHeader {
-              text: "NÃO SINCRONIZADAS AQUI"
+              text: "NOT SYNCED HERE"
               foreground: root.barForeground
               fontFamily: root.fontFamily
             }
@@ -864,8 +896,8 @@ Panel {
             Text {
               visible: root.serverOnly.length === 0 && root.remoteError === ""
               width: parent.width
-              text: root.account ? "Todas as bibliotecas do servidor estão sincronizadas."
-                                 : "Carregando…"
+              text: root.account ? "Every server library is already synced."
+                                 : "Loading…"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -880,10 +912,10 @@ Panel {
                 label: modelData.name
                 sub: root.fmtSize(modelData.size) + " · alterada " + root.fmtAgo(modelData.mtime)
                 actionIcon: root.isCloning(modelData.id) ? "" : "󰇚"
-                actionTip: "Sincronizar nesta máquina"
+                actionTip: "Sync on this machine"
                 actionEnabled: root.running && root.busyRepo === ""
                 actionBusy: root.busyRepo === modelData.id
-                trailing: root.isCloning(modelData.id) ? "baixando" : (modelData.permission === "r" ? "somente leitura" : "")
+                trailing: root.isCloning(modelData.id) ? "downloading" : (modelData.permission === "r" ? "read only" : "")
                 onActivated: root.openLibrary(modelData)
                 onActionTriggered: root.syncLibrary(modelData)
               }
@@ -893,7 +925,7 @@ Panel {
               visible: root.serverOnly.length > 0
               width: parent.width
               wrapMode: Text.WordWrap
-              text: "Clique na linha para abrir no servidor, ou em 󰇚 para sincronizar aqui. Bibliotecas criptografadas ainda precisam do cliente gráfico."
+              text: "Click a row to open it on the server, or 󰇚 to sync it here. Encrypted libraries still need the desktop client."
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -909,7 +941,7 @@ Panel {
 
             PanelSeparator { foreground: root.barForeground }
             PanelSectionHeader {
-              text: "FAVORITOS"
+              text: "STARRED"
               foreground: root.barForeground
               fontFamily: root.fontFamily
             }
@@ -917,7 +949,7 @@ Panel {
             Text {
               visible: root.starred.length === 0 && root.remoteError === ""
               width: parent.width
-              text: root.account ? "Nenhum favorito marcado no servidor." : "Carregando…"
+              text: root.account ? "Nothing starred on the server." : "Loading…"
               color: root.dim
               font.family: root.fontFamily
               font.pixelSize: Style.font.caption
@@ -940,7 +972,7 @@ Panel {
           Button {
             visible: root.tab !== "local" && root.loggedIn
             iconText: "󰍂"
-            text: root.account ? "Sair de " + root.account.user : "Sair"
+            text: root.account ? "Sign out of " + root.account.user : "Sign out"
             fontSize: Style.font.caption
             bordered: true
             foreground: root.barForeground
@@ -962,10 +994,10 @@ Panel {
     }
   }
 
-  // Uma linha por biblioteca local. O botão de ação vive DENTRO da primeira
-  // linha, como item do layout: assim ele alinha com o nome, respeita a
-  // margem do card e não pode transbordar. O MouseArea vem antes da coluna
-  // para ficar por baixo — os Text deixam o clique passar, o botão não.
+  // One row per local library. The action button lives INSIDE the first line,
+  // as a layout item: that way it aligns with the name, respects the card's
+  // margin and cannot overflow. The MouseArea comes before the column so it
+  // sits underneath — Text items let the click through, the button does not.
   component RepoRow: Item {
     id: row
     property var repo: ({})
@@ -1003,8 +1035,8 @@ Panel {
           anchors.right: parent.right
           anchors.verticalCenter: parent.verticalCenter
           iconText: root.confirmDesync === row.repo.id ? "󰄬" : "󰅖"
-          text: root.confirmDesync === row.repo.id ? "confirmar" : ""
-          tooltipText: "Parar de sincronizar (mantém os arquivos)"
+          text: root.confirmDesync === row.repo.id ? "confirm" : ""
+          tooltipText: "Stop syncing (files stay on disk)"
           fontSize: Style.font.caption
           iconSize: Style.font.caption
           horizontalPadding: Style.space(4)
@@ -1057,7 +1089,7 @@ Panel {
     }
   }
 
-  // Linha genérica das abas remotas e de pastas, mesmo esquema.
+  // Generic row for the remote and folder sections, same scheme.
   component ListRow: Item {
     id: lrow
     property string icon: ""

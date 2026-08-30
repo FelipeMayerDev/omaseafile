@@ -29,8 +29,8 @@ WORKTREE = os.environ.get("OMASEAFILE_WORKTREE", f"{HOME}/Seafile")
 # never a requirement. 0600: it holds an API token.
 CONF = f"{HOME}/.config/omarchy/omaseafile"
 ACCOUNT_FILE = f"{CONF}/account.json"
-# Sair da conta não pode apagar a conta do cliente gráfico, então marca a
-# saída: enquanto o marcador existir, o fallback do accounts.db é ignorado.
+# Signing out cannot delete the desktop client's account, so it marks the exit:
+# while this flag exists, the accounts.db fallback is ignored.
 LOGOUT_FLAG = f"{CONF}/logged-out"
 FLATPAK_APP = "com.seafile.Client"
 
@@ -105,8 +105,8 @@ def daemon_running():
 def daemon_start():
     kind, cmd = daemon_binary()
     if not kind:
-        return {"ok": False, "error": "seaf-daemon não encontrado (instale o pacote "
-                                      "seafile ou o flatpak com.seafile.Client)"}
+        return {"ok": False, "error": "seaf-daemon not found (install the seafile package "
+                                      "or the com.seafile.Client flatpak)"}
     if daemon_running():
         return {"ok": True, "error": ""}
     if kind == "native":
@@ -129,7 +129,7 @@ def daemon_start():
         if daemon_running():
             return {"ok": True, "error": ""}
         time.sleep(0.25)
-    return {"ok": False, "error": "o daemon não subiu a tempo"}
+    return {"ok": False, "error": "the daemon did not come up in time"}
 
 
 def daemon_stop():
@@ -143,7 +143,7 @@ def daemon_stop():
         if not daemon_running():
             return {"ok": True, "error": ""}
         time.sleep(0.25)
-    return {"ok": False, "error": "o daemon não parou"}
+    return {"ok": False, "error": "the daemon did not stop"}
 
 
 def call(fname, *args):
@@ -287,7 +287,7 @@ def login():
     try:
         args = json.load(sys.stdin)
     except ValueError:
-        print(json.dumps({"ok": False, "error": "entrada inválida"}))
+        print(json.dumps({"ok": False, "error": "invalid input"}))
         return
     url = (args.get("server") or "").strip().rstrip("/")
     user = (args.get("user") or "").strip()
@@ -295,7 +295,7 @@ def login():
     if not url.startswith("http"):
         url = "https://" + url
     if not url or not user or not password:
-        print(json.dumps({"ok": False, "error": "servidor, usuário e senha são obrigatórios"}))
+        print(json.dumps({"ok": False, "error": "server, user and password are required"}))
         return
     headers = {}
     if args.get("otp"):
@@ -309,9 +309,9 @@ def login():
         }, headers)
     except urllib.error.HTTPError as e:
         detail = e.read()[:200].decode("utf-8", "replace")
-        msg = "senha inválida" if e.code == 400 else "HTTP %s" % e.code
+        msg = "invalid password" if e.code == 400 else "HTTP %s" % e.code
         if "otp" in detail.lower() or e.code == 401:
-            msg = "código de dois fatores necessário"
+            msg = "two-factor code required"
         print(json.dumps({"ok": False, "error": msg}))
         return
     except (urllib.error.URLError, OSError, ValueError) as e:
@@ -319,7 +319,7 @@ def login():
         return
     token = res.get("token")
     if not token:
-        print(json.dumps({"ok": False, "error": "servidor não devolveu token"}))
+        print(json.dumps({"ok": False, "error": "server returned no token"}))
         return
     os.makedirs(CONF, exist_ok=True)
     try:
@@ -351,15 +351,15 @@ def sync_repo(repo_id):
     over the RPC socket we already speak."""
     acct = account()
     if not acct:
-        return {"ok": False, "error": "faça login primeiro"}
+        return {"ok": False, "error": "sign in first"}
     if not daemon_running():
-        return {"ok": False, "error": "o daemon não está rodando"}
+        return {"ok": False, "error": "the daemon is not running"}
     try:
         d = api(acct, "/api2/repos/%s/download-info/" % repo_id)
     except (urllib.error.URLError, OSError, ValueError) as e:
         return {"ok": False, "error": str(e)}
     if d.get("encrypted") == 1:
-        return {"ok": False, "error": "biblioteca criptografada: sincronize pelo cliente Seafile"}
+        return {"ok": False, "error": "encrypted library: sync it with the Seafile client"}
     more = {"server_url": acct["url"], "is_readonly": 1 if d.get("permission") == "r" else 0}
     if d.get("salt"):
         more["repo_salt"] = d["salt"]
@@ -375,7 +375,7 @@ def sync_repo(repo_id):
 
 def desync_repo(repo_id):
     if not daemon_running():
-        return {"ok": False, "error": "o daemon não está rodando"}
+        return {"ok": False, "error": "the daemon is not running"}
     try:
         call("seafile_destroy_repo", repo_id)
     except OSError as e:
@@ -407,8 +407,8 @@ def remote():
     out = {"account": None, "serverRepos": [], "starred": [], "remoteError": ""}
     acct = account()
     if not acct:
-        # Sem conta o painel mostra o formulário de login; um erro aqui só
-        # poluiria a tela depois de uma saída deliberada.
+        # With no account the panel shows the login form; an error here would
+        # only clutter the screen after a deliberate sign-out.
         print(json.dumps(out))
         return
     out["account"] = {"url": acct["url"], "user": acct["user"], "name": acct["name"],
@@ -435,7 +435,7 @@ def remote():
             })
         out["serverRepos"].sort(key=lambda r: (r["synced"], -r["size"]))
     except (urllib.error.URLError, OSError, ValueError) as e:
-        out["remoteError"] = "Bibliotecas: %s" % e
+        out["remoteError"] = "Libraries: %s" % e
 
     # 11.x serves starred-items; older servers only the api2 endpoint.
     try:
@@ -460,7 +460,7 @@ def remote():
                 })
         except (urllib.error.URLError, OSError, ValueError) as e:
             if not out["remoteError"]:
-                out["remoteError"] = "Favoritos: %s" % e
+                out["remoteError"] = "Starred: %s" % e
 
     print(json.dumps(out))
 
@@ -474,7 +474,7 @@ def main():
     if "--install-cmd" in sys.argv:
         cmd = install_command()
         return print(json.dumps({"cmd": cmd,
-                                 "error": "" if cmd else "nenhum instalador disponível"}))
+                                 "error": "" if cmd else "no installer available"}))
     if "--daemon-start" in sys.argv:
         return print(json.dumps(daemon_start()))
     if "--daemon-stop" in sys.argv:
@@ -536,9 +536,9 @@ def main():
             }
         out["repos"].append(entry)
 
-    # Uma biblioteca sendo baixada pela primeira vez NÃO aparece em
-    # get_repo_list: ela é uma clone task até terminar. Sem isso o download
-    # roda invisível e o botão de sincronizar parece não fazer nada.
+    # A library being downloaded for the first time does NOT show up in
+    # get_repo_list: it is a clone task until it finishes. Without this the
+    # download runs invisibly and the sync button looks like it does nothing.
     for t in call("seafile_get_clone_tasks") or []:
         state = t.get("state") or ""
         if state == "done":
@@ -560,8 +560,8 @@ def main():
                 "total": pick(tt, "block-total", "block_total") or 0,
             }
         out["cloning"].append(entry)
-        # A pasta do clone já existe no disco; sem isto ela seria listada
-        # como "fora do sync" enquanto baixa.
+        # The clone's folder already exists on disk; without this it would be
+        # listed as "not synced" while downloading.
         if entry["path"]:
             worktrees.add(os.path.realpath(entry["path"]))
 

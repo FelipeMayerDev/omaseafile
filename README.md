@@ -1,98 +1,94 @@
 # OmaSeafile
 
-Seafile na barra do Omarchy — **sem depender do cliente gráfico**.
+Seafile in the Omarchy bar — **without depending on the desktop client**.
 
 ![OmaSeafile](preview.png)
 
-> *English:* Seafile bar widget for Omarchy. It talks to `seaf-daemon` over its
-> own RPC socket, so it starts the daemon, logs into the server and adds
-> libraries by itself — the Seafile desktop client is optional. UI is in
-> Brazilian Portuguese.
-
-## Instalação
+## Install
 
 ```sh
 omarchy plugin add https://github.com/FelipeMayerDev/omaseafile.git --enable
 ```
 
-A única dependência é o binário `seaf-daemon`. Se ele não estiver na máquina,
-o próprio painel oferece um botão que instala (`yay -S --needed seafile` no
-Arch, que traz só o daemon e o `seaf-cli`, sem interface gráfica).
+The only requirement is the `seaf-daemon` binary. If it is not on the machine,
+the panel offers a button that installs it (`yay -S --needed seafile` on Arch,
+which ships the daemon and `seaf-cli`, no GUI).
 
-## O cliente gráfico é opcional
+## The desktop client is optional
 
-O OmaSeafile fala direto com o socket RPC do `seaf-daemon`
-(`~/Seafile/.seafile-data/seafile.sock`), o mesmo que o `seaf-cli` usa. Por
-isso ele não precisa do applet do Seafile rodando — nem instalado:
+OmaSeafile talks straight to `seaf-daemon`'s RPC socket
+(`~/Seafile/.seafile-data/seafile.sock`), the same one `seaf-cli` uses. So it
+never needs the Seafile applet running — or even installed:
 
-- sobe e derruba o `seaf-daemon` pela chave no painel;
-- faz login no servidor e guarda o próprio token de API;
-- adiciona e remove bibliotecas por conta própria.
+- starts and stops `seaf-daemon` from the switch in the panel, and brings it up
+  automatically at login;
+- signs into the server and keeps its own API token;
+- adds and removes libraries on its own.
 
-Se você já usa o cliente gráfico, a conta configurada nele é aproveitada
-automaticamente e nada muda.
+If you already use the desktop client, the account configured there is picked
+up automatically and nothing changes.
 
-## O que aparece
+## What it shows
 
-**Locais** — bibliotecas sincronizadas com estado ao vivo (sincronizada,
-enviando, recebendo, indexando, pausada, erro), taxa de transferência, tamanho
-em disco, downloads em andamento com porcentagem, pastas dentro de `~/Seafile`
-que nenhuma biblioteca sincroniza, e erros por arquivo.
+**Local** — synced libraries with live state (in sync, uploading, downloading,
+indexing, paused, error), transfer rate, size on disk, downloads in progress
+with a percentage, folders inside `~/Seafile` that no library syncs, and
+per-file errors.
 
-**Remotas** — bibliotecas que existem no servidor mas não sincronizam aqui,
-com tamanho e data. O botão 󰇚 sincroniza na hora.
+**Remote** — libraries that exist on the server but do not sync here, with size
+and date. The 󰇚 button syncs one right away.
 
-**Favoritos** — itens marcados com estrela no servidor. Se a biblioteca já
-estiver sincronizada, o clique abre o arquivo local; senão, abre no navegador.
+**Starred** — items starred on the server. If the library is already synced the
+click opens the local file, otherwise it opens in the browser.
 
-Notificações quando uma biblioteca começa a enviar ou receber, quando um
-download termina, e quando algo falha. Ponto vermelho no ícone da barra em caso
-de erro; o ícone pulsa durante uma transferência.
+Notifications when a library starts uploading or downloading, when a download
+finishes, and when something fails. A red dot on the bar icon marks errors; the
+icon pulses during a transfer.
 
-## Controles
+## Controls
 
-- Chave no topo do painel: liga/desliga o `seaf-daemon`.
-- 󰅖 numa biblioteca local: para de sincronizar (dois toques; os arquivos ficam).
-- Clique numa linha: abre a pasta/arquivo, ou a biblioteca no servidor.
-- Clique do meio no ícone da barra: atualiza na hora.
+- Switch at the top of the panel: start/stop `seaf-daemon`.
+- 󰅖 on a local library: stop syncing it (two taps; the files stay on disk).
+- Click a row: open the folder/file, or the library on the server.
+- Middle click on the bar icon: refresh now.
 
-## Login
+## Sign in
 
-Servidor, e-mail e senha no painel. A senha só é trocada por um token de API
-(`/api2/auth-token/`) e descartada; o token fica em
-`~/.config/omarchy/omaseafile/account.json` com modo 0600.
+Server, email and password in the panel. The password is only exchanged for an
+API token (`/api2/auth-token/`) and then discarded; the token lives in
+`~/.config/omarchy/omaseafile/account.json` with mode 0600.
 
-Bibliotecas criptografadas ainda precisam do cliente gráfico, para a senha da
-biblioteca.
+Encrypted libraries still need the desktop client, for the library password.
 
-## Ícone
+## Icon
 
-`seafile.png` é o logo colorido, usado no painel. `seafile-mono.png` é a
-máscara monocromática, tingida em tempo de execução com a cor do tema via
-`MultiEffect` — o mesmo tratamento que o Tray do Omarchy dá a ícones
-simbólicos. Na barra o ícone acompanha o tema; no painel continua colorido.
+`seafile.png` is the colored logo, used in the panel. `seafile-mono.png` is the
+monochrome mask, tinted at runtime with the theme color through `MultiEffect` —
+the same treatment Omarchy's Tray gives symbolic icons. In the bar the icon
+follows the theme; in the panel it stays colored.
 
-## Ajustes
+## Settings
 
-`interval` (poll local, padrão 10s), `remoteInterval` (chamadas ao servidor,
-só com o painel aberto) e `notifyTransfers`.
+`interval` (local poll, default 10s), `remoteInterval` (server calls, only
+while the panel is open), `autostart` (bring the daemon up automatically) and
+`notifyTransfers`.
 
 ## CLI
 
-`bin/seafile-status` funciona sozinho no terminal e só depende de `python3`:
+`bin/seafile-status` works on its own in a terminal and only needs `python3`:
 
 ```sh
-seafile-status                 # estado local em json
-seafile-status --sizes         # + tamanho em disco
-seafile-status --remote        # conta, bibliotecas do servidor, favoritos
+seafile-status                 # local state as json
+seafile-status --sizes         # plus size on disk
+seafile-status --remote        # account, server libraries, starred items
 seafile-status --daemon-start | --daemon-stop
-seafile-status --login         # {"server","user","password","otp"} no stdin
+seafile-status --login         # {"server","user","password","otp"} on stdin
 seafile-status --logout
 seafile-status --sync <id> | --desync <id>
-seafile-status --install-cmd   # comando que instala o seaf-daemon
+seafile-status --install-cmd   # command that installs seaf-daemon
 seafile-status --selftest
 ```
 
-## Licença
+## License
 
 MIT.
