@@ -12,6 +12,7 @@ sandbox. Protocol: <uint32 length><json body>, both ways.
   seafile-status --login      -> {"server","user","password","otp"} on stdin
   seafile-status --logout
   seafile-status --sync <repo-id> | --desync <repo-id>
+  seafile-status --clear-errors -> forget the recorded file sync errors
   seafile-status --install-cmd -> shell command that installs the daemon
 
 The Seafile GUI client never has to run: this drives seaf-daemon directly.
@@ -383,6 +384,19 @@ def desync_repo(repo_id):
     return {"ok": True, "error": ""}
 
 
+def clear_errors():
+    """The daemon keeps every file error in repo.db and never expires them, so
+    a one-off conflict stays listed long after the library synced again."""
+    if not daemon_running():
+        return {"ok": False, "error": "the daemon is not running"}
+    try:
+        for e in call("seafile_get_file_sync_errors", -1, -1) or []:
+            call("seafile_del_file_sync_error_by_id", e["id"])
+    except OSError as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "error": ""}
+
+
 def epoch(value):
     """starred-items reports an ISO timestamp; the repo APIs report epochs."""
     if isinstance(value, (int, float)):
@@ -487,6 +501,8 @@ def main():
         return print(json.dumps(sync_repo(arg_after("--sync"))))
     if "--desync" in sys.argv:
         return print(json.dumps(desync_repo(arg_after("--desync"))))
+    if "--clear-errors" in sys.argv:
+        return print(json.dumps(clear_errors()))
     if "--remote" in sys.argv:
         return remote()
     if "--selftest" in sys.argv:
