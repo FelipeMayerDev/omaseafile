@@ -346,6 +346,10 @@ Panel {
     runAction(syncProc, ["--desync", repo.id])
   }
 
+  function clearFileErrors() {
+    runAction(clearErrorsProc, ["--clear-errors"])
+  }
+
   function submitLogin() {
     if (loginBusy) return
     loginBusy = true
@@ -394,6 +398,12 @@ Panel {
     id: syncProc
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.readResult(text) }
     onExited: { root.busyRepo = ""; root.refresh(); root.refreshRemote() }
+  }
+
+  Process {
+    id: clearErrorsProc
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.readResult(text) }
+    onExited: root.refresh()
   }
 
   Process {
@@ -814,6 +824,20 @@ Panel {
                 font.family: root.fontFamily
                 font.pixelSize: Style.font.caption
               }
+            }
+
+            // Seafile never expires these, so a resolved conflict would stay
+            // here for good; clearing only forgets the record, not the files.
+            Button {
+              iconText: "󰃢"
+              text: "Clear errors"
+              tooltipText: "Forget these errors (conflict copies stay on disk)"
+              fontSize: Style.font.caption
+              bordered: true
+              enabled: !clearErrorsProc.running
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              onClicked: root.clearFileErrors()
             }
           }
 

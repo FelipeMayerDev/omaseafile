@@ -102,6 +102,7 @@ seafile-status --daemon-start | --daemon-stop
 seafile-status --login         # {"server","user","password","otp"} on stdin
 seafile-status --logout
 seafile-status --sync <id> | --desync <id>
+seafile-status --clear-errors  # forget recorded file sync errors
 seafile-status --install-cmd   # command that installs seaf-daemon
 seafile-status --selftest
 ```
