@@ -2,7 +2,7 @@
   "schemaVersion": 1,
   "id": "io.github.felipemayerdev.omaseafile",
   "name": "OmaSeafile",
-  "version": "1.2.0",
+  "version": "1.2.1",
   "author": "Felipe Mayer",
   "license": "MIT",
   "description": "Seafile in the Omarchy bar: synced libraries, live state, size on disk, server libraries, starred items and transfer notifications. It starts its own seaf-daemon and connects to the server by itself — the Seafile desktop client is optional.",

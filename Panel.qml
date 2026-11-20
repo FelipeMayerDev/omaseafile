@@ -196,8 +196,13 @@ Panel {
     var i
 
     if (!primed) {
-      for (i = 0; i < list.length; i++) seen[list[i].id] = list[i].state
+      var known = {}
+      for (i = 0; i < list.length; i++) {
+        seen[list[i].id] = list[i].state
+        if (list[i].error) known[list[i].id] = list[i].error
+      }
       lastStates = seen
+      erroredRepos = known
       var seed = {}
       var seedList = next.cloning || []
       for (i = 0; i < seedList.length; i++) seed[seedList[i].id] = seedList[i]
@@ -219,10 +224,8 @@ Panel {
         notify("normal", "Library downloaded", r.name + " is ready")
         continue
       }
-      if (was === r.state) continue
-      if (r.error)
-        notify("critical", "Sync error", r.name + ": " + r.error)
-      else if (r.state === "uploading")
+      if (was === r.state || r.error) continue
+      if (r.state === "uploading")
         notify("low", "Uploading files", r.name)
       else if (r.state === "downloading")
         notify("low", "Downloading files", r.name)
@@ -230,6 +233,32 @@ Panel {
         notify("low", "In sync", r.name)
     }
     lastStates = seen
+    notifyErrors(list)
+  }
+
+  // Library id -> error already announced. With the server down the daemon
+  // retries every ~30s and flips initializing -> error each time; an error is
+  // only "over" once the library reaches synchronized again, so one outage
+  // means one notification, with every affected library in it.
+  property var erroredRepos: ({})
+
+  function notifyErrors(list) {
+    var known = erroredRepos, fresh = {}, i
+    for (i = 0; i < list.length; i++) {
+      var r = list[i]
+      if (r.error) {
+        if (known[r.id] !== r.error) (fresh[r.error] = fresh[r.error] || []).push(r.name)
+        known[r.id] = r.error
+      } else if (r.state === "synchronized") {
+        delete known[r.id]
+      }
+    }
+    var ids = {}
+    for (i = 0; i < list.length; i++) ids[list[i].id] = true
+    for (var id in known) if (!ids[id]) delete known[id]
+    erroredRepos = known
+    if (!notifyTransfers) return
+    for (var msg in fresh) notify("critical", "Sync error", fresh[msg].join(", ") + ": " + msg)
   }
 
   // A finished download leaves `cloning` and lands in `repos`. A failed one
@@ -333,6 +362,20 @@ Panel {
     installProc.running = true
   }
 
+  // `which` is an error id, or "all".
+  function clearErrors(which) {
+    if (clearProc.running) return
+    actionError = ""
+    clearProc.command = [statusScript, "--clear-error", String(which)]
+    clearProc.running = true
+  }
+
+  // The file itself may be gone (a conflict renames it): open its folder.
+  function openErrorFolder(err) {
+    var local = localPathFor(err.repoId, "/" + err.path)
+    if (local !== "") openPath(local.substring(0, local.lastIndexOf("/")))
+  }
+
   function syncLibrary(lib) {
     if (busyRepo !== "") return
     busyRepo = lib.id
@@ -394,6 +437,12 @@ Panel {
     id: syncProc
     stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.readResult(text) }
     onExited: { root.busyRepo = ""; root.refresh(); root.refreshRemote() }
+  }
+
+  Process {
+    id: clearProc
+    stdout: StdioCollector { waitForEnd: true; onStreamFinished: root.readResult(text) }
+    onExited: root.refresh()
   }
 
   Process {
@@ -805,15 +854,30 @@ Panel {
 
             Repeater {
               model: root.tab === "local" ? root.fileErrors : []
-              Text {
+              ListRow {
                 required property var modelData
                 width: parent.width
-                wrapMode: Text.WordWrap
-                text: "󰀦 " + modelData.path + " — " + modelData.error
-                color: root.urgent
-                font.family: root.fontFamily
-                font.pixelSize: Style.font.caption
+                icon: "󰀦"
+                iconColor: root.urgent
+                label: modelData.path.split("/").pop()
+                sub: modelData.repo + " · " + modelData.error
+                actionIcon: "󰅖"
+                actionTip: "Dismiss"
+                actionEnabled: !clearProc.running
+                onActivated: root.openErrorFolder(modelData)
+                onActionTriggered: root.clearErrors(modelData.id)
               }
+            }
+
+            Button {
+              iconText: "󰃢"
+              text: "Clear all"
+              fontSize: Style.font.caption
+              bordered: true
+              enabled: !clearProc.running
+              foreground: root.barForeground
+              fontFamily: root.fontFamily
+              onClicked: root.clearErrors("all")
             }
           }
 
@@ -1093,6 +1157,7 @@ Panel {
   component ListRow: Item {
     id: lrow
     property string icon: ""
+    property color iconColor: root.dim
     property string label: ""
     property string sub: ""
     property string trailing: ""
@@ -1125,7 +1190,7 @@ Panel {
           anchors.left: parent.left
           anchors.verticalCenter: parent.verticalCenter
           text: lrow.icon
-          color: root.dim
+          color: lrow.iconColor
           font.family: root.fontFamily
           font.pixelSize: Style.font.body
         }

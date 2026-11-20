@@ -12,6 +12,7 @@ sandbox. Protocol: <uint32 length><json body>, both ways.
   seafile-status --login      -> {"server","user","password","otp"} on stdin
   seafile-status --logout
   seafile-status --sync <repo-id> | --desync <repo-id>
+  seafile-status --clear-error <error-id|all>
   seafile-status --install-cmd -> shell command that installs the daemon
 
 The Seafile GUI client never has to run: this drives seaf-daemon directly.
@@ -383,6 +384,23 @@ def desync_repo(repo_id):
     return {"ok": True, "error": ""}
 
 
+def clear_errors(which):
+    """Dismiss file sync errors: one id, or "all" of the per-file ones."""
+    if not daemon_running():
+        return {"ok": False, "error": "the daemon is not running"}
+    try:
+        if which == "all":
+            ids = [e["id"] for e in call("seafile_get_file_sync_errors", -1, -1) or []
+                   if e.get("path")]
+        else:
+            ids = [int(which)]
+        for i in ids:
+            call("seafile_del_file_sync_error_by_id", i)
+    except (OSError, ValueError) as e:
+        return {"ok": False, "error": str(e)}
+    return {"ok": True, "error": ""}
+
+
 def epoch(value):
     """starred-items reports an ISO timestamp; the repo APIs report epochs."""
     if isinstance(value, (int, float)):
@@ -487,6 +505,8 @@ def main():
         return print(json.dumps(sync_repo(arg_after("--sync"))))
     if "--desync" in sys.argv:
         return print(json.dumps(desync_repo(arg_after("--desync"))))
+    if "--clear-error" in sys.argv:
+        return print(json.dumps(clear_errors(arg_after("--clear-error"))))
     if "--remote" in sys.argv:
         return remote()
     if "--selftest" in sys.argv:
@@ -580,12 +600,17 @@ def main():
         out["unsynced"].append({"name": name, "path": path,
                                 "size": du(path) if sizes else -1})
 
+    # Entries without a path are repo-level errors (server unreachable…): the
+    # daemon re-inserts one on every failed sync attempt and the library row
+    # already shows it, so only real per-file errors are listed here.
     errs = call("seafile_get_file_sync_errors", -1, -1) or []
     out["fileErrors"] = [{
+        "id": e.get("id"),
         "repo": e.get("repo_name") or e.get("repo-name") or "",
-        "path": e.get("path") or "",
+        "repoId": e.get("repo_id") or e.get("repo-id") or "",
+        "path": e["path"],
         "error": sync_err(e.get("err_id") or e.get("err-id") or 0),
-    } for e in errs[:20]]
+    } for e in errs if e.get("path")][:20]
 
     print(json.dumps(out))
 
